@@ -234,7 +234,7 @@ def inversion(
                 prev_frame = ckpt_prev["z"]
                 # Subsequent frames require fewer iterations.
                 # Reduce total_iterations to speed up inversion, but this may lower quality.
-                total_iterations = 150
+                total_iterations = 1500
                 lr_schedule_cnt = 20
                 step_list_base = [interval]  # Phase 1: 仅关键帧端点, t=1.0 退化为恒等
             else:
@@ -242,7 +242,7 @@ def inversion(
                 prev_frame = model.encode_first_stage(load_img(os.path.join(frame_path,'00000.png')))
                 torch.save(prev_frame, os.path.join(prompt_path, 'init.pth'))
                 # The first frame requires more iterations.
-                total_iterations = 500
+                total_iterations = 10000
                 lr_schedule_cnt = 300
                 step_list_base = [0]
             # add random noise to the previous frame
@@ -461,7 +461,7 @@ def inversion(
 
                 step_list_base = [_ for _ in range(1, interval + 1)]  # [1, 2, ..., interval] 含关键帧
                 step_list = step_list_base
-                total_iterations_p2 = 500
+                total_iterations_p2 = 1500
                 lr_schedule_cnt = 10
 
                 randn = (prev_frame * sigma + rand_noise * (1 - sigma)).detach()
