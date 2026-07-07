@@ -23,7 +23,7 @@ import lpips
 # ===== Config =====
 DATA_DIR = "/root/autodl-tmp/sky/results/rank8_interval10"
 GT_DIR = "/root/Promptus/data/sky"
-TOTAL_IDS = 131  # id 00000 ~ 00130
+TOTAL_IDS = 101  # id 00000 ~ 00130
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 

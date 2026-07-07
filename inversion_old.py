@@ -145,7 +145,7 @@ def inversion(
             latest_min_loss = 1e9
 
             # logs and results path
-            prompt_path = os.path.join(frame_path, 'results/rank{}_interval{}/'.format(rank, interval))
+            prompt_path = os.path.join('/root/autodl-tmp/sky', 'results/rank{}_interval{}_baseline/'.format(rank, interval))
             log_path = os.path.join(prompt_path,'{:05d}'.format(f_id))
             if not os.path.exists(log_path):
                 os.makedirs(log_path)

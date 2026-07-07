@@ -22,9 +22,9 @@ from PIL import Image
 import lpips
 
 # ===== Config =====
-DATA_DIR = "/root/autodl-tmp/sky/results/rank4_interval10_color"
+DATA_DIR = "/root/autodl-tmp/sky/results/rank8_interval10_baseline"
 GT_DIR = "/root/Promptus/data/sky"
-ITER_STEP = "01490"
+ITER_STEP = "01450"
 TOTAL_IDS = 101  # id 00000 ~ 00130 (inclusive)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -67,15 +67,15 @@ def get_result_path(id_val):
       ...
       id=121~130 -> folder 00130
     """
-    if id_val == 0:
-        result_path = os.path.join(
-            DATA_DIR, "00000", "iter_09990_id_00000.png"
-        )
-    else:
-        folder = ((id_val + 9) // 10) * 10
-        result_path = os.path.join(
-            DATA_DIR, f"{folder:05d}", f"iter_{ITER_STEP}_id_{id_val:05d}.png"
-        )
+    # if id_val == 0:
+    #     result_path = os.path.join(
+    #         DATA_DIR, "00000", "iter_09990_id_00000.png"
+    #     )
+    # else:
+    folder = ((id_val + 9) // 10) * 10
+    result_path = os.path.join(
+        DATA_DIR, f"{folder:05d}", f"iter_{ITER_STEP}_id_{id_val:05d}.png"
+    )
     return result_path
 
 
