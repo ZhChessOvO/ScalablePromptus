@@ -25,7 +25,7 @@ import lpips
 DATA_DIR = "/root/autodl-tmp/sky/results/rank8_interval10_baseline"
 GT_DIR = "/root/Promptus/data/sky"
 ITER_STEP = "01450"
-TOTAL_IDS = 101  # id 00000 ~ 00130 (inclusive)
+TOTAL_IDS = 131  # id 00000 ~ 00130 (inclusive)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
