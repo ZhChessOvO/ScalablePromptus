@@ -6,3 +6,4 @@ __pycache__
 *.onnx
 docs/imgs/sky
 docs/imgs/uvg
+README.md
