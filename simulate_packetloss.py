@@ -3,24 +3,33 @@ simulate_packetloss.py — Simulate packet loss during prompt transmission using
 the Gilbert-Elliott (GE) model.
 
 Evaluates the quality (PSNR / SSIM / LPIPS) of generated frames when
-higher-order prompt components (beyond min_rank) are randomly lost due to
-packet loss, mimicking what would happen under unreliable network conditions.
+prompt components are randomly lost during transmission, mimicking what
+would happen under unreliable network conditions.
+
+Transmission order (as required):
+    Frame-by-frame, rank-by-rank (small→large):
+        keyframe 0: rank 0, rank 1, ..., rank R-1
+        keyframe 1: rank 0, rank 1, ..., rank R-1
+        ...
 
 The GE model alternates between Good and Bad states:
   - Good state: no packet loss
   - Bad state:  high probability of packet loss
-Transitions: p_gb (Good→Bad), p_bg (Bad→Good)
+Transitions: p_gb (Good→Bad), p_bg (Bad→Good).
 
-Essential components (rank 0..min_rank-1) are always preserved.
-Components rank min_rank..R-1 are subject to GE-modeled packet loss.
+The GE Markov chain runs continuously across the entire transmission
+sequence (state persists across keyframes). Essential components
+(rank 0 .. min_rank-1) are always preserved. Lost components are
+ZEROED and stay zero — safe_slerp_col prevents the other keyframe
+from "filling in" lost information during interpolation.
 
 Usage:
-    python simulate_packetloss.py \
-        -frame_path "data/sky" \
-        -prompt_dir "data/sky/results/rank16_interval10" \
-        -rank 16 \
-        -interval 10 \
-        --min_rank 4 \
+    python simulate_packetloss.py \\
+        -frame_path "data/sky" \\
+        -prompt_dir "data/sky/results/rank16_interval10" \\
+        -rank 16 \\
+        -interval 10 \\
+        --min_rank 4 \\
         --loss_rates 0.0 0.1 0.2 0.3 0.4 0.5
 """
 
@@ -109,92 +118,126 @@ def load_image(path):
     return np.array(img).astype(np.float32) / 255.0
 
 
-def gilbert_elliott_loss_mask(n_components, loss_rate, p_gb=0.1, p_bg=0.3, seed=42):
-    """Generate a binary loss mask using the Gilbert-Elliott burst-loss model.
+def gilbert_elliott_global_mask(
+        n_keyframes, train_rank, min_rank, loss_rate,
+        p_gb=0.1, p_bg=0.3, seed=42
+):
+    """Generate a global Gilbert-Elliott loss mask across ALL keyframes.
 
-    Two-state Markov chain:
-      - Good (0): no packet loss.
-      - Bad  (1): packets drop with probability loss_bad.
+    Packet transmission order (as required):
+        keyframe 0: rank 0, rank 1, ..., rank R-1
+        keyframe 1: rank 0, rank 1, ..., rank R-1
+        ...
 
-    loss_bad is derived from the target average loss_rate:
-        loss_rate = P(bad) × loss_bad
-        P(bad)    = p_gb / (p_gb + p_bg)
+    The GE Markov chain runs continuously across this entire sequence.
+    Ranks 0 .. min_rank-1 are essential and ALWAYS survive (override to no-loss).
+    Ranks min_rank .. R-1 are subject to GE burst loss.
 
     Args:
-        n_components: number of components (packets) to generate mask for.
-        loss_rate:    target average packet loss rate in [0, 1].
-        p_gb:         Good → Bad transition probability.
-        p_bg:         Bad → Good transition probability.
-        seed:         random seed for reproducibility.
+        n_keyframes: total number of keyframe prompts.
+        train_rank:  full rank R.
+        min_rank:    essential rank (ranks < min_rank never drop).
+        loss_rate:   target average loss rate on non-essential ranks.
+        p_gb:        Good → Bad transition probability.
+        p_bg:        Bad → Good transition probability.
+        seed:        random seed.
 
     Returns:
-        mask: boolean array of shape (n_components,), True = lost.
+        keep_mask: bool array of shape (n_keyframes, train_rank).
+                   True = packet arrived, False = lost (zero it out).
     """
     rng = np.random.RandomState(seed)
 
     # Steady-state probability of Bad state
-    p_bad = p_gb / (p_gb + p_bg)
+    p_bad = p_gb / (p_gb + p_bg + 1e-12)
 
-    # Derive loss probability in Bad state to hit the target average loss rate.
-    # Assume loss_good = 0.
+    # Derive loss probability in Bad state to hit target loss_rate.
+    # loss_rate = P(bad) * loss_bad  =>  loss_bad = loss_rate / P(bad)
     if p_bad > 0:
         loss_bad = min(loss_rate / p_bad, 1.0)
     else:
         loss_bad = 0.0
 
-    state = 0  # start in Good state
-    mask = np.zeros(n_components, dtype=bool)
+    # Total packets: all keyframes × all ranks
+    n_total = n_keyframes * train_rank
+    state = 0  # start in Good
+    packet_dropped = np.zeros(n_total, dtype=bool)
 
-    for i in range(n_components):
-        if state == 0:  # Good
-            mask[i] = False
+    for i in range(n_total):
+        if state == 0:  # Good → no loss, may transition to Bad
+            packet_dropped[i] = False
             if rng.rand() < p_gb:
                 state = 1
-        else:  # Bad
-            mask[i] = rng.rand() < loss_bad
+        else:  # Bad → loss with prob loss_bad, may transition to Good
+            packet_dropped[i] = rng.rand() < loss_bad
             if rng.rand() < p_bg:
                 state = 0
 
-    return mask
+    # Reshape to (n_keyframes, train_rank)
+    packet_dropped = packet_dropped.reshape(n_keyframes, train_rank)
+
+    # Essential ranks (0 .. min_rank-1) always survive
+    packet_dropped[:, :min_rank] = False
+
+    # keep_mask: True = survived, False = lost
+    keep_mask = ~packet_dropped
+    return keep_mask
 
 
-def apply_packet_loss(U, V, min_rank, loss_rate, p_gb=0.1, p_bg=0.3, seed=42):
-    """Apply GE packet loss to SVD components beyond min_rank.
+def safe_slerp_col(a, b, t, eps=1e-5):
+    """SLERP for a single column vector, handling zero-vector gracefully.
 
-    Components 0 .. min_rank-1 are always preserved (essential low-rank).
-    Components min_rank .. R-1 are subject to GE burst loss — lost columns
-    of U and rows of V are set to zero.
+    If either vector is all-zero (lost packet), return the other one as-is
+    (or zero if both are lost).  Otherwise perform normal SLERP.
 
     Args:
-        U, V:      dequantized prompt matrices.
-        min_rank:  number of essential components to always keep.
-        loss_rate: target average packet loss rate.
-        p_gb, p_bg: GE transition probabilities.
-        seed:      random seed.
+        a, b: 1-D tensors of same shape.
+        t:    interpolation factor in [0, 1].
+    Returns:
+        interpolated 1-D tensor.
+    """
+    a_is_zero = (a.abs().max() < 1e-8)
+    b_is_zero = (b.abs().max() < 1e-8)
+
+    if a_is_zero and b_is_zero:
+        return torch.zeros_like(a)
+    if a_is_zero:
+        return b
+    if b_is_zero:
+        return a
+
+    # Normal SLERP
+    a_n = a / (a.norm() + 1e-12)
+    b_n = b / (b.norm() + 1e-12)
+    cos_theta = (a_n * b_n).sum().clamp(-1.0, 1.0)
+    theta = torch.acos(cos_theta)
+    sin_theta = torch.sin(theta)
+
+    if sin_theta < eps:
+        return (1.0 - t) * a + t * b
+
+    factor_a = torch.sin((1.0 - t) * theta) / sin_theta
+    factor_b = torch.sin(t * theta) / sin_theta
+    return factor_a * a + factor_b * b
+
+
+def apply_global_loss_to_prompts(all_prompts, keep_mask):
+    """Zero out lost rank components across all keyframe prompts.
+
+    Args:
+        all_prompts: list of dicts with keys 'U', 'V' (dequantized tensors).
+        keep_mask:   bool array (n_keyframes, train_rank), True = survived.
 
     Returns:
-        U_lost, V_lost: tensors with lost components zeroed out.
+        all_prompts (modified in-place).
     """
-    rank = U.shape[1]
-    if min_rank >= rank:
-        return U, V
-
-    n_extra = rank - min_rank
-    mask_extra = gilbert_elliott_loss_mask(n_extra, loss_rate, p_gb, p_bg, seed)
-
-    # Full keep mask: first min_rank always True, rest from GE model
-    full_keep = np.ones(rank, dtype=bool)
-    full_keep[min_rank:] = ~mask_extra  # True = kept, False = lost
-
-    U_lost = U.clone()
-    V_lost = V.clone()
-
-    lost_indices = np.where(~full_keep)[0]
-    if len(lost_indices) > 0:
-        U_lost[:, lost_indices] = 0
-        V_lost[lost_indices, :] = 0
-
-    return U_lost, V_lost
+    for k, prompt_data in enumerate(all_prompts):
+        lost = ~keep_mask[k]  # ranks to zero out
+        lost_indices = np.where(lost)[0]
+        if len(lost_indices) > 0:
+            prompt_data['U'][:, lost_indices] = 0
+            prompt_data['V'][lost_indices, :] = 0
+    return all_prompts
 
 
 @torch.no_grad()
@@ -204,6 +247,12 @@ def generate_video_with_loss(
         p_gb=0.1, p_bg=0.3, slerp_mode=True
 ):
     """Generate video frames with simulated packet loss on each keyframe pair.
+
+    Packet loss is modelled with a GLOBAL Gilbert-Elliott chain that runs
+    continuously across ALL keyframes × ALL ranks (frame-by-frame,
+    rank-by-rank as required). Lost rank components are set to zero and
+    STAY zero — safe_slerp_col prevents the other keyframe from "filling in"
+    the lost information.
 
     Returns:
         frames: dict mapping frame_id → generated image (H, W, 3) float32 [0, 1].
@@ -222,53 +271,62 @@ def generate_video_with_loss(
     def denoiser(input, sigma, c):
         return model.denoiser(model.model, input, sigma, c)
 
+    # ---- Phase 1: load all keyframe prompts into memory ----
+    prompt_paths = sorted(glob(os.path.join(prompt_dir_full, 'frame_*.prompt')))
+    all_prompts_raw = []
+    for pp in prompt_paths:
+        all_prompts_raw.append(torch.load(pp, weights_only=True))
+
+    # Dequantize all
+    all_prompts = []
+    for pd in all_prompts_raw:
+        qp_u = QParam(num_bits=8)
+        qp_u.scale = pd['U_scale']
+        qp_u.zero_point = pd['U_zero_point']
+        U = qp_u.dequantize_tensor(pd['U'])
+        qp_v = QParam(num_bits=8)
+        qp_v.scale = pd['V_scale']
+        qp_v.zero_point = pd['V_zero_point']
+        V = qp_v.dequantize_tensor(pd['V'])
+        all_prompts.append({'U': U.clone(), 'V': V.clone()})
+
+    # ---- Phase 2: generate GLOBAL GE loss mask across all keyframes ----
+    n_keyframes = len(all_prompts)
+    keep_mask = gilbert_elliott_global_mask(
+        n_keyframes=n_keyframes,
+        train_rank=train_rank,
+        min_rank=min_rank,
+        loss_rate=loss_rate,
+        p_gb=p_gb,
+        p_bg=p_bg,
+        seed=42,
+    )
+
+    # ---- Phase 3: apply loss (zero out lost ranks) ----
+    all_prompts = apply_global_loss_to_prompts(all_prompts, keep_mask)
+
+    # ---- Phase 4: generate video using lost prompts ----
     prev_frame = None
     frames = {}
+    eff_rank = train_rank  # normalise by full training rank
 
-    loss_seed = 42
+    for idx in range(n_keyframes - 1):
+        prompt_curr = all_prompts[idx]
+        prompt_next = all_prompts[idx + 1]
+        path_curr = prompt_paths[idx]
+        path_next = prompt_paths[idx + 1]
 
-    prompts = sorted(glob(os.path.join(prompt_dir_full, 'frame_*.prompt')))
-    for prompt_pair in zip(prompts[::], prompts[1::]):
-        prompt_curr = prompt_pair[0]
-        id_curr = int(re.search(r'frame_(\d{5})\.prompt', prompt_curr).group(1))
-        prompt_next = prompt_pair[1]
-        id_next = int(re.search(r'frame_(\d{5})\.prompt', prompt_next).group(1))
+        id_curr = int(re.search(r'frame_(\d{5})\.prompt', path_curr).group(1))
+        id_next = int(re.search(r'frame_(\d{5})\.prompt', path_next).group(1))
 
-        prompt_curr_data = torch.load(prompt_curr, weights_only=True)
-        prompt_next_data = torch.load(prompt_next, weights_only=True)
+        U_curr, V_curr = prompt_curr['U'], prompt_curr['V']
+        U_next, V_next = prompt_next['U'], prompt_next['V']
 
-        U_curr, V_curr = prompt_curr_data['U'], prompt_curr_data['V']
-        U_next, V_next = prompt_next_data['U'], prompt_next_data['V']
-
-        # Dequantize
-        def dequantize(U_q, V_q, prompt_data):
-            qp_u = QParam(num_bits=8)
-            qp_u.scale = prompt_data['U_scale']
-            qp_u.zero_point = prompt_data['U_zero_point']
-            U = qp_u.dequantize_tensor(U_q)
-            qp_v = QParam(num_bits=8)
-            qp_v.scale = prompt_data['V_scale']
-            qp_v.zero_point = prompt_data['V_zero_point']
-            V = qp_v.dequantize_tensor(V_q)
-            return U, V
-
-        U_curr, V_curr = dequantize(U_curr, V_curr, prompt_curr_data)
-        U_next, V_next = dequantize(U_next, V_next, prompt_next_data)
-
-        # ---- Apply packet loss to components beyond min_rank ----
-        U_curr, V_curr = apply_packet_loss(
-            U_curr, V_curr, min_rank, loss_rate, p_gb, p_bg, seed=loss_seed
-        )
-        loss_seed += 1
-        U_next, V_next = apply_packet_loss(
-            U_next, V_next, min_rank, loss_rate, p_gb, p_bg, seed=loss_seed
-        )
-        loss_seed += 1
-
-        eff_rank = train_rank  # normalise by full training rank
-
+        # ---- First keyframe (init) ----
         if prev_frame is None:
-            prev_frame = torch.load(os.path.join(prompt_dir_full, 'init.pth'), weights_only=True)
+            prev_frame = torch.load(
+                os.path.join(prompt_dir_full, 'init.pth'), weights_only=True
+            )
             z = (prev_frame * sigma + rand_noise * (1 - sigma))
             c = (U_curr @ V_curr / np.sqrt(eff_rank)).unsqueeze(dim=0)
             prompt = {'crossattn': c}
@@ -278,17 +336,34 @@ def generate_video_with_loss(
             frames[id_curr] = img[0].permute(1, 2, 0).cpu().numpy()
             prev_frame = samples_z
 
+        # ---- Interpolate between keyframes ----
         z = (prev_frame * sigma + rand_noise * (1 - sigma))
         for step in range(1, interval + 1):
             t = step / interval
             t_i = torch.tensor(t, device=U_curr.device)
 
-            if slerp_mode:
-                u = slerp(U_curr.T, U_next.T, t_i.view(-1, 1)).T
-                v = slerp(V_curr, V_next, t_i.view(-1, 1))
-            else:
-                u = (1 - t_i.view(1, -1)) * U_curr + t_i.view(1, -1) * U_next
-                v = (1 - t_i.view(-1, 1)) * V_curr + t_i.view(-1, 1) * V_next
+            # Build interpolated U, V rank-by-rank using safe_slerp_col
+            u_cols = []
+            v_rows = []
+            for r in range(train_rank):
+                u_c = U_curr[:, r]
+                u_n = U_next[:, r]
+                v_c = V_curr[r, :]
+                v_n = V_next[r, :]
+
+                if slerp_mode:
+                    u_interp = safe_slerp_col(u_c, u_n, t_i)
+                    v_interp = safe_slerp_col(v_c, v_n, t_i)
+                else:
+                    # LERP fallback
+                    u_interp = (1 - t_i) * u_c + t_i * u_n
+                    v_interp = (1 - t_i) * v_c + t_i * v_n
+
+                u_cols.append(u_interp)
+                v_rows.append(v_interp)
+
+            u = torch.stack(u_cols, dim=1)  # (d, R)
+            v = torch.stack(v_rows, dim=0)  # (R, d)
 
             c = (u @ v / np.sqrt(eff_rank)).unsqueeze(dim=0)
             prompt = {'crossattn': c}

@@ -180,7 +180,7 @@ def inversion(
         # Inversion.
         suffix = '_baseline' if baseline else ''
         suffix = suffix + args.suffix
-        prompt_path = os.path.join('/root/autodl-tmp/uvg', 'results/rank{}_interval{}{}/'.format(rank, interval, suffix))
+        prompt_path = os.path.join('/root/autodl-tmp/sky', 'results/rank{}_interval{}{}/'.format(rank, interval, suffix))
 
         for f_id in range(0, max_id, interval):
             # Initialize the low-rank factor U.
