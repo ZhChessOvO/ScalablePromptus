@@ -35,7 +35,7 @@
 
 ```bash
 # Clone the repository
-git clone <repo-url> && cd Promptus
+git clone https://github.com/ZhChessOvO/ScalablePromptus.git && cd Promptus
 
 # Create conda environment
 conda env create -f environment.yml
