@@ -189,5 +189,13 @@ This project is licensed under the **Apache License 2.0**. See [LICENSE](LICENSE
 If you find this work useful, please consider citing:
 
 ```bibtex
-comming soon
+@misc{cao2026scalablepromptusscalablehighfidelitypromptbased,
+      title={ScalablePromptus: Scalable and High-Fidelity Prompt-Based Video Streaming}, 
+      author={Zehao Cao and Bowei Xu and Xun Cao and Zhan Ma and Hao Chen},
+      year={2026},
+      eprint={2607.26106},
+      archivePrefix={arXiv},
+      primaryClass={eess.IV},
+      url={https://arxiv.org/abs/2607.26106}, 
+}
 ```
