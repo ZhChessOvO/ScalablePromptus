@@ -3,7 +3,7 @@
 
 # 🎬 ScalablePromptus: Scalable and High-Fidelity Prompt-Based Video Streaming
 
-> ⚠️ **This work is currently under submission to AAAI 2027. Please cite our arxiv version if you need our code.**
+> ⚠️ **This work is currently under submission. Please cite our arxiv version if you need our code.**
 
 </div>
 
